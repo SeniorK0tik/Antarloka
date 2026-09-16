@@ -249,6 +249,10 @@ impl NoiseXX {
     }
 
     fn read_message(&mut self, msg: &[u8]) -> Result<Vec<u8>, String> {
+        // Late-initialised on purpose: each branch below is a line-for-line
+        // mirror of the Kotlin implementation, and folding them into one
+        // `let payload = if ...` expression would obscure that correspondence.
+        #[allow(clippy::needless_late_init)]
         let payload;
         if !self.initiator && self.step == 0 {
             // -> e
