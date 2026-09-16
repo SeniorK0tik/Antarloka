@@ -1,0 +1,28 @@
+# Rust
+/desktop/target/
+
+# Android / Gradle
+/mobile/.gradle/
+/mobile/build/
+/mobile/app/build/
+/mobile/local.properties
+/mobile/.cxx/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# SyncMob runtime data — must never be committed
+identity.json
+trust.json
+/incoming/
+
+# Kotlin / build leftovers
+/mobile/.kotlin/
+*.apk
+*.aab

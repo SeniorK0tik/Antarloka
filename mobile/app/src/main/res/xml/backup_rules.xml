@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Backups are disabled entirely (allowBackup=false); this file documents the
+     intent and stays in place if backups are ever turned on. The identity key
+     and the trust store must never leave the device. -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="syncmob_identity.xml" />
+    <exclude domain="file" path="trust.json" />
+    <exclude domain="file" path="incoming/" />
+</full-backup-content>

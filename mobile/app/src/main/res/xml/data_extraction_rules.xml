@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="syncmob_identity.xml" />
+        <exclude domain="file" path="trust.json" />
+        <exclude domain="file" path="incoming/" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="syncmob_identity.xml" />
+        <exclude domain="file" path="trust.json" />
+        <exclude domain="file" path="incoming/" />
+    </device-transfer>
+</data-extraction-rules>

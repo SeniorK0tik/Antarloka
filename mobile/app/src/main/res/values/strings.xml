@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SyncMob</string>
+    <string name="channel_name">Работа в фоне</string>
+    <string name="channel_desc">Уведомление о том, что SyncMob принимает подключения</string>
+</resources>

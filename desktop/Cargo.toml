@@ -1,0 +1,64 @@
+[package]
+name = "syncmob-desktop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "SyncMob desktop (Windows) node: encrypted LAN file & message transfer"
+license = "MIT"
+
+[lib]
+name = "syncmob"
+path = "src/lib.rs"
+
+[[bin]]
+name = "syncmob-desktop"
+path = "src/main.rs"
+required-features = ["gui"]
+
+[features]
+default = ["gui"]
+# The GUI is an optional front-end so that the security/network core can be
+# built and tested on a machine without any windowing system.
+gui = ["dep:eframe", "dep:egui", "dep:rfd", "dep:chrono"]
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+snow = "0.10"
+rand = "0.9"
+blake2 = "0.10"
+sha2 = "0.10"
+chacha20poly1305 = "0.10"
+argon2 = "0.5"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+subtle = "2"
+
+hex = "0.4"
+base64 = "0.22"
+qrcode = "0.14"
+
+socket2 = { version = "0.6", features = ["all"] }
+if-addrs = "0.15"
+directories = "6"
+
+eframe = { version = "0.32", optional = true, default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+egui = { version = "0.32", optional = true }
+chrono = { version = "0.4", optional = true }
+rfd = { version = "0.17", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
