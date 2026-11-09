@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -28,9 +29,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
@@ -62,6 +65,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -294,11 +300,34 @@ private fun DevicesScreen(
         ) {
             item {
                 Spacer(Modifier.height(8.dp))
-                Text(
-                    "${state.settings.deviceName} • порт ${state.port} • ID ${state.myDeviceId}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Dim,
-                )
+                SelectionContainer {
+                    Column {
+                        Text(
+                            "${state.settings.deviceName} • порт ${state.port} • ID ${state.myDeviceId}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Dim,
+                        )
+                        if (state.localAddresses.isNotEmpty()) {
+                            Text(
+                                "Адрес телефона: " +
+                                    state.localAddresses.joinToString { "$it:${state.port}" },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Dim,
+                            )
+                        }
+                    }
+                }
+                if (state.vpnActive) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "Включён VPN. Если устройства не видят друг друга: введите адрес " +
+                            "телефона на ПК в «Подключиться по адресу», добавьте SyncMob в " +
+                            "исключения VPN (раздельное туннелирование) или разрешите в VPN " +
+                            "доступ к локальной сети.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Amber,
+                    )
+                }
                 if (!state.hardwareBackedKey) {
                     Spacer(Modifier.height(6.dp))
                     Text(
@@ -365,7 +394,7 @@ private fun DevicesScreen(
                                 val port = v.substringAfter(':', "").toIntOrNull()
                                     ?: org.syncmob.mobile.proto.Proto.DEFAULT_TCP_PORT
                                 if (host.isNotBlank()) {
-                                    engine.dial(InetSocketAddress(host, port), null)
+                                    engine.dial(InetSocketAddress.createUnresolved(host, port), null)
                                 }
                             }
                             manualHost = ""
@@ -424,16 +453,18 @@ private fun DevicesScreen(
                 Text("Журнал", fontWeight = FontWeight.Bold)
             }
             items(state.log.asReversed().take(40)) { line ->
-                Text(
-                    "${formatTime(line.ts)}  ${line.text}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = when (line.level) {
-                        Engine.LogLine.Level.GOOD -> Green
-                        Engine.LogLine.Level.WARN -> Amber
-                        Engine.LogLine.Level.ERROR -> Red
-                        else -> Dim
-                    },
-                )
+                SelectionContainer {
+                    Text(
+                        "${formatTime(line.ts)}  ${line.text}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = when (line.level) {
+                            Engine.LogLine.Level.GOOD -> Green
+                            Engine.LogLine.Level.WARN -> Amber
+                            Engine.LogLine.Level.ERROR -> Red
+                            else -> Dim
+                        },
+                    )
+                }
             }
             item { Spacer(Modifier.height(24.dp)) }
         }
@@ -519,7 +550,9 @@ private fun TransferRow(t: Engine.TransferView, onCancel: () -> Unit) {
             )
         } else {
             val detail = t.error ?: t.savedTo?.let { "сохранено в $it" } ?: "готово"
-            Text(detail, style = MaterialTheme.typography.bodySmall, color = Dim)
+            SelectionContainer {
+                Text(detail, style = MaterialTheme.typography.bodySmall, color = Dim)
+            }
         }
     }
 }
@@ -531,6 +564,15 @@ private fun ChatScreen(engine: Engine, state: Engine.State, deviceId: String, on
     val messages = state.chats[deviceId].orEmpty()
     var draft by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+    val copyToClipboard: (String) -> Unit = { text ->
+        clipboard.setText(AnnotatedString(text))
+        // Android 13+ shows its own confirmation when the clipboard changes.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            Toast.makeText(context, "Скопировано", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     val filePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments(),
@@ -555,12 +597,14 @@ private fun ChatScreen(engine: Engine, state: Engine.State, deviceId: String, on
         Column(Modifier.fillMaxSize().padding(padding).imePadding()) {
             if (device != null) {
                 Column(Modifier.padding(horizontal = 16.dp)) {
-                    Text(
-                        "Отпечаток: ${device.fingerprint}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Dim,
-                        fontFamily = FontFamily.Monospace,
-                    )
+                    SelectionContainer {
+                        Text(
+                            "Отпечаток: ${device.fingerprint}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Dim,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
                     if (device.paired) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Switch(
@@ -614,7 +658,26 @@ private fun ChatScreen(engine: Engine, state: Engine.State, deviceId: String, on
                             },
                             shape = RoundedCornerShape(10.dp),
                         ) {
-                            Text(m.text, modifier = Modifier.padding(10.dp))
+                            Row(verticalAlignment = Alignment.Top) {
+                                // Long-press selects any part of the message;
+                                // the button copies all of it in one tap.
+                                SelectionContainer(Modifier.weight(1f, fill = false)) {
+                                    Text(m.text, modifier = Modifier.padding(10.dp))
+                                }
+                                if (!m.system) {
+                                    IconButton(
+                                        onClick = { copyToClipboard(m.text) },
+                                        modifier = Modifier.size(36.dp),
+                                    ) {
+                                        Icon(
+                                            Icons.Default.ContentCopy,
+                                            contentDescription = "Копировать",
+                                            modifier = Modifier.size(16.dp),
+                                            tint = Dim,
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -690,11 +753,13 @@ private fun PairingDialog(engine: Engine, prompt: Engine.PairPrompt) {
                 )
                 Spacer(Modifier.height(12.dp))
                 Text("Отпечаток ключа собеседника", style = MaterialTheme.typography.labelSmall)
-                Text(
-                    prompt.fingerprint,
-                    fontFamily = FontFamily.Monospace,
-                    style = MaterialTheme.typography.bodySmall,
-                )
+                SelectionContainer {
+                    Text(
+                        prompt.fingerprint,
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
         },
         confirmButton = {
@@ -856,14 +921,19 @@ private fun IdentityScreen(state: Engine.State, onBack: () -> Unit) {
         },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).padding(16.dp)) {
-            Text(
-                state.myFingerprint,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 18.sp,
-            )
-            Spacer(Modifier.height(8.dp))
-            Text("ID: ${state.myDeviceId}", color = Dim)
-            Text("Порт: ${state.port}", color = Dim)
+            SelectionContainer {
+                Column {
+                    Text(
+                        state.myFingerprint,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 18.sp,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text("ID: ${state.myDeviceId}", color = Dim)
+                    Text("Порт: ${state.port}", color = Dim)
+                    for (a in state.localAddresses) Text("Адрес: $a:${state.port}", color = Dim)
+                }
+            }
             Spacer(Modifier.height(20.dp))
             Text(
                 "Этот отпечаток видит собеседник при сопряжении. " +

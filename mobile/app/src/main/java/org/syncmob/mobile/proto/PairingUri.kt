@@ -21,6 +21,11 @@ object PairingUri {
         val host: String,
         val port: Int,
         val name: String,
+        /**
+         * Every address to try, [host] first. A PC with a VPN up has several
+         * private addresses and cannot always tell which one is the Wi-Fi.
+         */
+        val hosts: List<String> = listOf(host),
     ) {
         override fun equals(other: Any?) = other is Target &&
             publicKey.contentEquals(other.publicKey) && host == other.host && port == other.port
@@ -32,6 +37,7 @@ object PairingUri {
         if (!uri.startsWith(PREFIX)) return null
         var pk: ByteArray? = null
         var host: String? = null
+        var extraHosts: List<String> = emptyList()
         var port = Proto.DEFAULT_TCP_PORT
         var name = ""
         for (kv in uri.removePrefix(PREFIX).split('&')) {
@@ -41,6 +47,7 @@ object PairingUri {
             when (k) {
                 "pk" -> pk = runCatching { Base64.getUrlDecoder().decode(v) }.getOrNull()
                 "host" -> host = v
+                "hosts" -> extraHosts = v.split(',').map { it.trim() }.filter { it.isNotEmpty() }
                 "port" -> port = v.toIntOrNull() ?: port
                 "name" -> name = Proto.clamp(unescape(v), 64)
             }
@@ -48,7 +55,24 @@ object PairingUri {
         val key = pk ?: return null
         if (key.size != 32) return null
         if (host.isNullOrBlank() || port <= 0 || port > 65535) return null
-        return Target(key, host, port, name)
+        if (!isIpLiteral(host)) return null
+        // Bad entries in the optional list are skipped, not fatal: `host`
+        // alone is still a complete, valid target.
+        val hosts = (listOf(host) + extraHosts.filter(::isIpLiteral)).distinct().take(MAX_HOSTS)
+        return Target(key, host, port, name, hosts)
+    }
+
+    private const val MAX_HOSTS = 8
+
+    /**
+     * Only literal addresses: a host name would mean a DNS lookup steered by
+     * whatever printed the QR code.
+     */
+    private fun isIpLiteral(s: String): Boolean {
+        if (s.isEmpty() || s.length > 45) return false
+        if (s.contains(':')) return s.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' || it == ':' || it == '.' }
+        val parts = s.split('.')
+        return parts.size == 4 && parts.all { p -> p.isNotEmpty() && p.length <= 3 && p.all(Char::isDigit) && p.toInt() <= 255 }
     }
 
     private fun unescape(s: String): String {

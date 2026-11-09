@@ -1145,7 +1145,9 @@ impl Running {
                 );
                 ui.add_space(6.0);
                 ui.label(RichText::new(format!("ID: {}", self.engine.device_id())).color(DIM));
-                if let Some(ip) = syncmob::engine::local_ipv4() {
+                // All of them, best guess first: with a VPN up the first one is
+                // not always the Wi-Fi address the phone can reach.
+                for ip in syncmob::engine::local_ipv4_candidates() {
                     ui.label(
                         RichText::new(format!("Адрес: {ip}:{}", self.engine.port())).color(DIM),
                     );

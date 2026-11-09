@@ -157,6 +157,25 @@ class ProtocolTest {
     }
 
     @Test
+    fun pairingUriListsEveryCandidateHostWithTheMainOneFirst() {
+        val pk = Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32) { 9 })
+        val t = PairingUri.parse(
+            "syncmob://pair?v=1&pk=$pk&port=45821&host=192.168.1.7" +
+                "&hosts=10.8.1.2,192.168.1.7,evil.example,300.1.1.1,172.20.0.1&name=PC",
+        )!!
+        assertEquals("192.168.1.7", t.host)
+        // Host names and impossible addresses are dropped; duplicates folded.
+        assertEquals(listOf("192.168.1.7", "10.8.1.2", "172.20.0.1"), t.hosts)
+
+        // Links from an older PC have no list at all.
+        val old = PairingUri.parse("syncmob://pair?v=1&pk=$pk&port=45821&host=192.168.1.7")!!
+        assertEquals(listOf("192.168.1.7"), old.hosts)
+
+        // The main host must itself be an address, not a name to look up.
+        assertNull(PairingUri.parse("syncmob://pair?v=1&pk=$pk&port=45821&host=evil.example"))
+    }
+
+    @Test
     fun transfer_ids_are_distinct_and_round_trip() {
         val a = TransferId.random()
         val b = TransferId.random()

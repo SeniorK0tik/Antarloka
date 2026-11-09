@@ -18,6 +18,7 @@ import org.syncmob.mobile.proto.Proto
 import org.syncmob.mobile.proto.TransferId
 import org.syncmob.mobile.security.Fingerprints
 import org.syncmob.mobile.security.TrustStore
+import org.syncmob.mobile.util.LocalNetwork
 import org.syncmob.mobile.util.SafeFiles
 import java.io.File
 import java.net.InetAddress
@@ -25,6 +26,7 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
@@ -108,6 +110,9 @@ class Engine(private val context: Context, val identity: Identity) {
         val pairPrompt: PairPrompt? = null,
         val offerPrompt: OfferPrompt? = null,
         val log: List<LogLine> = emptyList(),
+        /** This phone's Wi-Fi/Ethernet addresses, for connecting from the PC by hand. */
+        val localAddresses: List<String> = emptyList(),
+        val vpnActive: Boolean = false,
     )
 
     private val _state = MutableStateFlow(State(settings = Settings.load(context)))
@@ -148,6 +153,29 @@ class Engine(private val context: Context, val identity: Identity) {
     @Volatile
     private var pairPrompt: PairPrompt? = null
     private val offerQueue = ArrayDeque<OfferPrompt>()
+
+    /**
+     * Every public action the UI can trigger runs here, never on the caller's
+     * thread. Android forbids socket I/O on the main thread and throws
+     * `NetworkOnMainThreadException` — whose message is null — so a send made
+     * straight from a click handler fails with nothing useful to show. A single
+     * thread also keeps the user's actions (two quick messages, accept then
+     * cancel) in the order they were made.
+     */
+    private val actions = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "syncmob-actions").apply { isDaemon = true }
+    }
+
+    private fun onActionThread(block: () -> Unit) {
+        actions.execute {
+            try {
+                block()
+            } catch (e: Exception) {
+                note("Ошибка: ${e.reason()}", LogLine.Level.ERROR)
+                refresh()
+            }
+        }
+    }
 
     // ---- lifecycle ------------------------------------------------------
 
@@ -291,31 +319,61 @@ class Engine(private val context: Context, val identity: Identity) {
      * the peer proves in the handshake — this is what makes QR pairing immune
      * to a machine-in-the-middle.
      */
-    fun dial(address: InetSocketAddress, expectKey: ByteArray?) {
+    fun dial(address: InetSocketAddress, expectKey: ByteArray?) = dial(listOf(address), expectKey)
+
+    /**
+     * Try [addresses] in order and keep the first that completes a handshake.
+     * A PC behind a VPN has several private addresses and only one of them is
+     * on our Wi-Fi; the key check makes a wrong guess harmless.
+     */
+    fun dial(addresses: List<InetSocketAddress>, expectKey: ByteArray?) {
+        if (addresses.isEmpty()) return
         thread(name = "syncmob-dial", isDaemon = true) {
-            try {
-                val ip = address.address ?: InetAddress.getByName(address.hostString)
-                if (settings.lanOnly && !SafeFiles.isLanAddress(ip)) {
-                    note(
-                        "Адрес ${ip.hostAddress} вне локальной сети — подключение запрещено настройками",
-                        LogLine.Level.ERROR,
-                    )
-                    refresh()
-                    return@thread
-                }
+            val failures = ArrayList<String>()
+            // One address gets the full timeout; several share a shorter one
+            // each so a dead VPN address does not stall the right one for long.
+            val timeout = if (addresses.size == 1) {
+                Handshake.HANDSHAKE_TIMEOUT_MS
+            } else {
+                MULTI_DIAL_TIMEOUT_MS
+            }
+            for (address in addresses) {
                 if (conns.size >= MAX_CONNECTIONS) {
                     note("Слишком много подключений", LogLine.Level.ERROR)
                     refresh()
                     return@thread
                 }
-                val socket = Socket()
-                socket.connect(InetSocketAddress(ip, address.port), Handshake.HANDSHAKE_TIMEOUT_MS)
-                val session = Handshake.initiator(socket, identity)
+                val session = try {
+                    val ip = address.address ?: InetAddress.getByName(address.hostString)
+                    if (settings.lanOnly && !SafeFiles.isLanAddress(ip)) {
+                        failures += "${ip.hostAddress} — вне локальной сети (запрещено настройками)"
+                        continue
+                    }
+                    val socket = Socket()
+                    // With a VPN up, send LAN traffic over Wi-Fi rather than
+                    // into the tunnel, when the VPN allows it.
+                    LocalNetwork.bind(context, socket, ip)
+                    try {
+                        socket.connect(InetSocketAddress(ip, address.port), timeout)
+                        Handshake.initiator(socket, identity)
+                    } catch (e: Exception) {
+                        runCatching { socket.close() }
+                        throw e
+                    }
+                } catch (e: Exception) {
+                    failures += "${address.hostString} — ${e.reason()}"
+                    continue
+                }
                 runConnection(session, expectKey)
-            } catch (e: Exception) {
-                note("Не удалось подключиться: ${e.message}", LogLine.Level.ERROR)
-                refresh()
+                return@thread
             }
+            val hint = if (LocalNetwork.isVpnActive(context)) {
+                ". Включён VPN: добавьте SyncMob в исключения VPN или разрешите в нём доступ к локальной сети"
+            } else {
+                ""
+            }
+            note("Не удалось подключиться: ${failures.joinToString("; ")}$hint", LogLine.Level.ERROR)
+            refresh()
         }
     }
 
@@ -326,7 +384,12 @@ class Engine(private val context: Context, val identity: Identity) {
             refresh()
             return
         }
-        dial(InetSocketAddress(target.host, target.port), target.publicKey)
+        // Unresolved on purpose: this is called from the UI thread, and the
+        // dial thread does any resolving. The hosts are IP literals anyway.
+        dial(
+            target.hosts.map { InetSocketAddress.createUnresolved(it, target.port) },
+            target.publicKey,
+        )
     }
 
     private fun runConnection(session: SecureSession, expectKey: ByteArray?) {
@@ -406,7 +469,7 @@ class Engine(private val context: Context, val identity: Identity) {
                 }
             }
         } catch (e: Exception) {
-            reason = e.message ?: e.javaClass.simpleName
+            reason = e.reason()
         } finally {
             session.close()
             conns.remove(deviceId)
@@ -484,13 +547,18 @@ class Engine(private val context: Context, val identity: Identity) {
         return null
     }
 
-    fun disconnect(deviceId: String) {
+    fun disconnect(deviceId: String) = onActionThread { closeConnection(deviceId) }
+
+    private fun closeConnection(deviceId: String) {
         conns[deviceId]?.session?.close()
     }
 
     // ---- pairing --------------------------------------------------------
 
-    fun respondPairing(deviceId: String, accept: Boolean) {
+    fun respondPairing(deviceId: String, accept: Boolean) =
+        onActionThread { respondPairingNow(deviceId, accept) }
+
+    private fun respondPairingNow(deviceId: String, accept: Boolean) {
         val conn = conns[deviceId]
         if (conn == null) {
             pairPrompt = null
@@ -517,7 +585,7 @@ class Engine(private val context: Context, val identity: Identity) {
         try {
             trust.add(conn.key, conn.name)
         } catch (e: Exception) {
-            note("Не удалось сохранить сопряжение: ${e.message}", LogLine.Level.ERROR)
+            note("Не удалось сохранить сопряжение: ${e.reason()}", LogLine.Level.ERROR)
             refresh()
             return
         }
@@ -528,29 +596,31 @@ class Engine(private val context: Context, val identity: Identity) {
         refresh()
     }
 
-    fun forget(deviceId: String) {
-        val key = keyFor(deviceId) ?: return
+    fun forget(deviceId: String) = onActionThread {
+        val key = keyFor(deviceId) ?: return@onActionThread
         trust.remove(key)
-        disconnect(deviceId)
+        closeConnection(deviceId)
         note("Устройство удалено из доверенных", LogLine.Level.WARN)
         refresh()
     }
 
-    fun setAutoAccept(deviceId: String, on: Boolean) {
+    fun setAutoAccept(deviceId: String, on: Boolean) = onActionThread {
         keyFor(deviceId)?.let { trust.setAutoAccept(it, on) }
         refresh()
     }
 
-    fun setBlocked(deviceId: String, blocked: Boolean) {
-        val key = keyFor(deviceId) ?: return
+    fun setBlocked(deviceId: String, blocked: Boolean) = onActionThread {
+        val key = keyFor(deviceId) ?: return@onActionThread
         trust.setBlocked(key, blocked)
-        if (blocked) disconnect(deviceId)
+        if (blocked) closeConnection(deviceId)
         refresh()
     }
 
     // ---- text -----------------------------------------------------------
 
-    fun sendText(deviceId: String, text: String) {
+    fun sendText(deviceId: String, text: String) = onActionThread { sendTextNow(deviceId, text) }
+
+    private fun sendTextNow(deviceId: String, text: String) {
         val clean = Proto.clamp(text.trim(), Proto.MAX_TEXT_CHARS)
         if (clean.isEmpty()) return
         val conn = conns[deviceId]
@@ -564,7 +634,7 @@ class Engine(private val context: Context, val identity: Identity) {
             conn.session.send(Message.Text(TransferId.random(), ts, clean))
             addChat(deviceId, ChatItem(ts, true, clean, false))
         } catch (e: Exception) {
-            note("Не удалось отправить сообщение: ${e.message}", LogLine.Level.ERROR)
+            note("Не удалось отправить сообщение: ${e.reason()}", LogLine.Level.ERROR)
         }
         refresh()
     }
@@ -629,7 +699,7 @@ class Engine(private val context: Context, val identity: Identity) {
             conn.session.send(Message.FileDone(id, sha))
             finishOutgoing(id, deviceId, displayName, size, null, null)
         } catch (e: Exception) {
-            finishOutgoing(id, deviceId, displayName, 0, e.message ?: "ошибка отправки", null)
+            finishOutgoing(id, deviceId, displayName, 0, e.reason(), null)
         } finally {
             outgoing.remove(id.hex())
             staged.delete()
@@ -703,7 +773,8 @@ class Engine(private val context: Context, val identity: Identity) {
 
         val autoAccept = trust.get(conn.key)?.autoAcceptFiles == true
         if (autoAccept) {
-            respondOffer(o.id.hex(), true)
+            // Already on this connection's reader thread, which may do I/O.
+            respondOfferNow(o.id.hex(), true)
         } else {
             synchronized(offerQueue) {
                 offerQueue.addLast(
@@ -715,6 +786,14 @@ class Engine(private val context: Context, val identity: Identity) {
     }
 
     fun respondOffer(transferIdHex: String, accept: Boolean) {
+        // Drop the dialog right away so it cannot be tapped twice while the
+        // answer is on its way.
+        synchronized(offerQueue) { offerQueue.removeIf { it.transferId == transferIdHex } }
+        refresh()
+        onActionThread { respondOfferNow(transferIdHex, accept) }
+    }
+
+    private fun respondOfferNow(transferIdHex: String, accept: Boolean) {
         synchronized(offerQueue) { offerQueue.removeIf { it.transferId == transferIdHex } }
         val t = incoming[transferIdHex]
         if (t == null) {
@@ -733,7 +812,7 @@ class Engine(private val context: Context, val identity: Identity) {
             t.accept(context)
             conn?.session?.send(Message.FileAccept(id))
         } catch (e: Exception) {
-            abortIncoming(id, "не удалось создать файл: ${e.message}")
+            abortIncoming(id, "не удалось создать файл: ${e.reason()}")
             runCatching { conn?.session?.send(Message.FileReject(id, "ошибка записи на диск")) }
         }
         refresh()
@@ -748,7 +827,7 @@ class Engine(private val context: Context, val identity: Identity) {
         try {
             t.writeChunk(c.offset, c.data)
         } catch (e: Exception) {
-            val reason = e.message ?: "ошибка записи"
+            val reason = e.reason()
             runCatching { conn.session.send(Message.FileError(c.id, reason)) }
             abortIncoming(c.id, reason)
             refresh()
@@ -774,7 +853,7 @@ class Engine(private val context: Context, val identity: Identity) {
                 addChat(deviceId, ChatItem(System.currentTimeMillis(), false, text, true))
                 note(text, LogLine.Level.GOOD)
             } catch (e: Exception) {
-                val reason = e.message ?: "ошибка"
+                val reason = e.reason()
                 runCatching { conn.session.send(Message.FileError(c.id, reason)) }
                 finished[c.id.hex()] = TransferView(
                     c.id.hex(), deviceId, t.name, t.size, t.received, true, true, reason, null,
@@ -797,7 +876,9 @@ class Engine(private val context: Context, val identity: Identity) {
         refresh()
     }
 
-    fun cancelTransfer(transferIdHex: String) {
+    fun cancelTransfer(transferIdHex: String) = onActionThread { cancelTransferNow(transferIdHex) }
+
+    private fun cancelTransferNow(transferIdHex: String) {
         outgoing[transferIdHex]?.let { o ->
             o.cancelled = true
             val conn = conns[o.toDeviceId]
@@ -938,6 +1019,8 @@ class Engine(private val context: Context, val identity: Identity) {
             pairPrompt = pairPrompt,
             offerPrompt = synchronized(offerQueue) { offerQueue.firstOrNull() },
             log = synchronized(logLines) { logLines.toList() },
+            localAddresses = LocalNetwork.localAddresses(context),
+            vpnActive = LocalNetwork.isVpnActive(context),
         )
     }
 
@@ -968,7 +1051,16 @@ class Engine(private val context: Context, val identity: Identity) {
         const val PAIRING_TIMEOUT_MS = 180_000L
         const val OFFER_TIMEOUT_MS = 300_000L
         const val KEEPALIVE_MS = 30_000L
+        /** Per-address connect timeout when a QR code lists several. */
+        const val MULTI_DIAL_TIMEOUT_MS = 4_000
         private const val HANDSHAKES_PER_MINUTE = 10
 
     }
 }
+
+/**
+ * A human-readable reason for a failure. Many JVM/Android exceptions carry no
+ * message at all, and showing the user "null" helps no one.
+ */
+internal fun Throwable.reason(): String =
+    message?.takeIf { it.isNotBlank() } ?: javaClass.simpleName

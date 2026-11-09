@@ -1,11 +1,13 @@
 package org.syncmob.mobile.net
 
 import android.content.Context
+import android.net.Network
 import android.net.wifi.WifiManager
 import android.util.Log
 import org.syncmob.mobile.proto.Beacon
 import org.syncmob.mobile.proto.Proto
 import org.syncmob.mobile.security.Fingerprints
+import org.syncmob.mobile.util.LocalNetwork
 import org.syncmob.mobile.util.SafeFiles
 import java.net.DatagramPacket
 import java.net.Inet4Address
@@ -153,7 +155,15 @@ class Discovery(
 
     private fun announceLoop(s: MulticastSocket) {
         val group = InetAddress.getByName(Proto.MULTICAST_GROUP)
+        var boundTo: Network? = null
         while (running.get()) {
+            // A VPN on the phone swallows broadcasts and multicast too, so the
+            // PC never hears us. Pin the socket to Wi-Fi when that is allowed;
+            // re-checked every round because VPN and Wi-Fi come and go.
+            if (boundTo != null || LocalNetwork.isVpnActive(context)) {
+                val lan = LocalNetwork.lanNetwork(context)
+                if (lan != null && lan != boundTo && LocalNetwork.bind(lan, s)) boundTo = lan
+            }
             if (announcing) {
                 val payload = Beacon(ownPublicKey, announcedName, announcedPort, "android").encode()
                 if (payload.size <= Proto.MAX_BEACON_BYTES) {

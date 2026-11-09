@@ -124,6 +124,19 @@ impl Discovery {
                                 let _ = send_sock
                                     .send_to(&payload, SocketAddr::from((bcast, DISCOVERY_PORT)));
                             }
+                            // Multicast leaves through the default route, which
+                            // with a full-tunnel VPN is the tunnel. Send a copy
+                            // out of every interface so the Wi-Fi one gets it.
+                            let group =
+                                SocketAddr::V4(SocketAddrV4::new(MULTICAST_GROUP, DISCOVERY_PORT));
+                            for ip in interface_ipv4s() {
+                                if socket2::SockRef::from(&send_sock)
+                                    .set_multicast_if_v4(&ip)
+                                    .is_ok()
+                                {
+                                    let _ = send_sock.send_to(&payload, group);
+                                }
+                            }
                         }
                         sleep_interruptible(&running, ANNOUNCE_INTERVAL);
                     }
@@ -190,6 +203,26 @@ fn join_multicast(socket: &UdpSocket) {
     if !joined_any {
         let _ = socket.join_multicast_v4(&MULTICAST_GROUP, &Ipv4Addr::UNSPECIFIED);
     }
+}
+
+/// Our own non-loopback IPv4 addresses on the local network.
+fn interface_ipv4s() -> Vec<Ipv4Addr> {
+    let mut out = Vec::new();
+    if let Ok(ifaces) = if_addrs::get_if_addrs() {
+        for iface in ifaces {
+            if iface.is_loopback() {
+                continue;
+            }
+            if let IpAddr::V4(v4) = iface.ip() {
+                if is_lan_addr(IpAddr::V4(v4)) {
+                    out.push(v4);
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Per-interface broadcast addresses, so we also reach subnets where the

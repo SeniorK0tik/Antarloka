@@ -50,6 +50,8 @@ pub const KEEPALIVE: Duration = Duration::from_secs(30);
 const HANDSHAKES_PER_MINUTE: u32 = 10;
 /// Depth of the UI event queue; the engine never blocks on a slow UI.
 const EVENT_QUEUE: usize = 4096;
+/// Addresses listed in the pairing QR code; more only makes the code denser.
+const MAX_QR_HOSTS: usize = 4;
 
 pub const PLATFORM: &str = if cfg!(windows) { "windows" } else { "desktop" };
 
@@ -445,11 +447,22 @@ impl Engine {
     pub fn pairing_uri(&self) -> String {
         let pk = B64URL.encode(self.inner.identity.public_key());
         let cfg = self.config();
-        let host = local_ipv4()
+        let candidates = local_ipv4_candidates();
+        let host = candidates
+            .first()
             .map(|i| i.to_string())
             .unwrap_or_else(|| "0.0.0.0".into());
+        // `host` stays the single best guess so older phones keep working;
+        // `hosts` lists every candidate, and a current phone tries each in
+        // turn. The key check makes trying a wrong address harmless.
+        let hosts = candidates
+            .iter()
+            .take(MAX_QR_HOSTS)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         format!(
-            "syncmob://pair?v=1&pk={pk}&port={}&host={host}&name={}",
+            "syncmob://pair?v=1&pk={pk}&port={}&host={host}&hosts={hosts}&name={}",
             self.port(),
             url_escape(&cfg.device_name)
         )
@@ -1620,15 +1633,96 @@ fn url_unescape(s: &str) -> String {
 
 /// Best-effort local IPv4 for display and for the pairing QR code.
 pub fn local_ipv4() -> Option<std::net::Ipv4Addr> {
-    let ifaces = if_addrs::get_if_addrs().ok()?;
-    ifaces
+    local_ipv4_candidates().into_iter().next()
+}
+
+/// Every local IPv4 address a phone on the same network might reach us at,
+/// most likely first.
+///
+/// With a VPN up, the VPN adapter also has a private address (10.x, 100.64.x),
+/// and it is often listed first. Putting that in the QR code sends the phone
+/// to an address it cannot reach, so adapters that look like tunnels or
+/// virtual machines are pushed to the back rather than trusted blindly.
+pub fn local_ipv4_candidates() -> Vec<std::net::Ipv4Addr> {
+    let Ok(ifaces) = if_addrs::get_if_addrs() else {
+        return Vec::new();
+    };
+    let mut scored: Vec<(u32, std::net::Ipv4Addr)> = ifaces
         .into_iter()
-        .filter(|i| !i.is_loopback())
-        .filter_map(|i| match i.ip() {
-            IpAddr::V4(v4) if is_lan_addr(IpAddr::V4(v4)) => Some(v4),
+        .filter(|i| !i.is_loopback() && i.oper_status != if_addrs::IfOperStatus::Down)
+        .filter_map(|i| match &i.addr {
+            if_addrs::IfAddr::V4(v4) if is_lan_addr(IpAddr::V4(v4.ip)) => Some((
+                lan_address_rank(&i.name, i.is_p2p, v4.ip, v4.prefixlen),
+                v4.ip,
+            )),
             _ => None,
         })
-        .next()
+        .collect();
+    scored.sort_by_key(|(rank, ip)| (*rank, *ip));
+    let mut out: Vec<std::net::Ipv4Addr> = Vec::new();
+    for (_, ip) in scored {
+        if !out.contains(&ip) {
+            out.push(ip);
+        }
+    }
+    out
+}
+
+/// Interface names that are almost never the shared Wi-Fi/Ethernet segment.
+const TUNNEL_HINTS: &[&str] = &[
+    "vpn",
+    "wireguard",
+    "wg",
+    "amnezia",
+    "awg",
+    "tun",
+    "tap",
+    "openvpn",
+    "ppp",
+    "tailscale",
+    "zerotier",
+    "hamachi",
+    "radmin",
+    "outline",
+    "proton",
+    "nord",
+    "cloudflare",
+    "warp",
+    "utun",
+];
+const VIRTUAL_HINTS: &[&str] = &[
+    "vethernet",
+    "hyper-v",
+    "wsl",
+    "virtualbox",
+    "vmware",
+    "vmnet",
+    "docker",
+    "virbr",
+    "br-",
+];
+
+/// Lower is better. Pure, so the ordering rules are directly testable.
+pub fn lan_address_rank(name: &str, is_p2p: bool, ip: std::net::Ipv4Addr, prefix: u8) -> u32 {
+    let lname = name.to_lowercase();
+    let has = |hints: &[&str]| hints.iter().any(|h| lname.contains(h));
+    let o = ip.octets();
+    // Home routers overwhelmingly hand out 192.168/16; VPNs and CGNAT
+    // overlays favour 10/8 and 100.64/10.
+    let mut rank = match o {
+        [192, 168, ..] => 0,
+        [172, b, ..] if (16..=31).contains(&b) => 10,
+        [10, ..] => 20,
+        [169, 254, ..] => 60,
+        _ => 30, // CGNAT and anything else private
+    };
+    // A /32 or /31 has no neighbours to talk to: that is a tunnel endpoint.
+    if is_p2p || prefix >= 31 || has(TUNNEL_HINTS) {
+        rank += 1000;
+    } else if has(VIRTUAL_HINTS) {
+        rank += 500;
+    }
+    rank
 }
 
 #[cfg(test)]
@@ -1657,6 +1751,32 @@ mod tests {
         // Wrong key length must be refused, not truncated or padded.
         let short = B64URL.encode([1u8; 16]);
         assert!(parse_pairing_uri(&format!("syncmob://pair?pk={short}&host=10.0.0.1")).is_err());
+    }
+
+    #[test]
+    fn wifi_address_beats_a_vpn_adapter() {
+        let wifi = lan_address_rank("Wi-Fi", false, "192.168.1.20".parse().unwrap(), 24);
+        let vpn_named = lan_address_rank("AmneziaVPN", false, "10.8.1.2".parse().unwrap(), 24);
+        let wg = lan_address_rank("wg0", false, "10.66.66.2".parse().unwrap(), 24);
+        let p2p = lan_address_rank("Ethernet 3", true, "10.0.0.2".parse().unwrap(), 24);
+        let host32 = lan_address_rank("Ethernet 4", false, "10.0.0.3".parse().unwrap(), 32);
+        let hyperv = lan_address_rank("vEthernet (WSL)", false, "172.20.0.1".parse().unwrap(), 20);
+        for other in [vpn_named, wg, p2p, host32, hyperv] {
+            assert!(wifi < other, "{wifi} !< {other}");
+        }
+        // A plain office LAN on 10/8 still beats any tunnel or VM adapter.
+        let office = lan_address_rank("Ethernet", false, "10.1.2.3".parse().unwrap(), 16);
+        assert!(office < hyperv && office < vpn_named);
+    }
+
+    #[test]
+    fn pairing_uri_keeps_a_single_host_for_older_phones() {
+        let pk = B64URL.encode([9u8; 32]);
+        let t = parse_pairing_uri(&format!(
+            "syncmob://pair?v=1&pk={pk}&port=45821&host=192.168.1.7&hosts=192.168.1.7,10.8.1.2&name=PC"
+        ))
+        .unwrap();
+        assert_eq!(t.host, "192.168.1.7".parse::<IpAddr>().unwrap());
     }
 
     #[test]
