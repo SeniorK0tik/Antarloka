@@ -511,9 +511,12 @@ impl Engine {
                             "Рукопожатие с {addr} не удалось: {e}"
                         ))),
                     },
-                    Err(e) => inner.emit(EngineEvent::Error(format!(
-                        "Не удалось подключиться к {addr}: {e}"
-                    ))),
+                    Err(e) => {
+                        let hint = connect_hint(&e, addr.ip(), vpn_adapter_present());
+                        inner.emit(EngineEvent::Error(format!(
+                            "Не удалось подключиться к {addr}: {e}{hint}"
+                        )))
+                    }
                 }
             })
             .ok();
@@ -1668,6 +1671,59 @@ pub fn local_ipv4_candidates() -> Vec<std::net::Ipv4Addr> {
     out
 }
 
+/// True when an interface that looks like a VPN tunnel is up on this PC.
+pub fn vpn_adapter_present() -> bool {
+    let Ok(ifaces) = if_addrs::get_if_addrs() else {
+        return false;
+    };
+    ifaces.iter().any(|i| {
+        !i.is_loopback()
+            && i.oper_status != if_addrs::IfOperStatus::Down
+            && match &i.addr {
+                if_addrs::IfAddr::V4(v4) => {
+                    lan_address_rank(&i.name, i.is_p2p, v4.ip, v4.prefixlen) >= TUNNEL_PENALTY
+                }
+                _ => false,
+            }
+    })
+}
+
+/// What the user can do about a failed connect, appended to the error.
+///
+/// A LAN peer that never answers is, in practice, almost always a VPN: on the
+/// phone it swallows the replies, on the PC a kill switch drops the packets.
+/// "Refused" means the packets did arrive, so that is a different story.
+pub fn connect_hint(err: &std::io::Error, ip: IpAddr, local_vpn: bool) -> &'static str {
+    use std::io::ErrorKind;
+    if !is_lan_addr(ip) {
+        return "";
+    }
+    match err.kind() {
+        ErrorKind::ConnectionRefused => {
+            ". Устройство ответило, но SyncMob на нём не принимает подключения: \
+             проверьте, что приложение запущено и порт верный"
+        }
+        ErrorKind::TimedOut | ErrorKind::HostUnreachable | ErrorKind::NetworkUnreachable
+            if local_vpn =>
+        {
+            ". На этом ПК включён VPN. Если в нём включён KillSwitch (в AmneziaVPN: \
+             Настройки → Соединение → KillSwitch), выключите его — он блокирует локальную \
+             сеть. Если VPN включён и на телефоне, добавьте SyncMob в его исключения \
+             (Раздельное туннелирование приложений)"
+        }
+        ErrorKind::TimedOut | ErrorKind::HostUnreachable | ErrorKind::NetworkUnreachable => {
+            ". Телефон не отвечает. Если на нём включён VPN, добавьте SyncMob в исключения \
+             VPN (в AmneziaVPN: Настройки → Соединение → Раздельное туннелирование \
+             приложений → «Приложения из списка не должны работать через VPN»). Также \
+             проверьте, что оба устройства в одной Wi-Fi сети"
+        }
+        _ => "",
+    }
+}
+
+/// Added to the rank of anything that looks like a tunnel endpoint.
+const TUNNEL_PENALTY: u32 = 1000;
+
 /// Interface names that are almost never the shared Wi-Fi/Ethernet segment.
 const TUNNEL_HINTS: &[&str] = &[
     "vpn",
@@ -1718,7 +1774,7 @@ pub fn lan_address_rank(name: &str, is_p2p: bool, ip: std::net::Ipv4Addr, prefix
     };
     // A /32 or /31 has no neighbours to talk to: that is a tunnel endpoint.
     if is_p2p || prefix >= 31 || has(TUNNEL_HINTS) {
-        rank += 1000;
+        rank += TUNNEL_PENALTY;
     } else if has(VIRTUAL_HINTS) {
         rank += 500;
     }
@@ -1767,6 +1823,24 @@ mod tests {
         // A plain office LAN on 10/8 still beats any tunnel or VM adapter.
         let office = lan_address_rank("Ethernet", false, "10.1.2.3".parse().unwrap(), 16);
         assert!(office < hyperv && office < vpn_named);
+    }
+
+    #[test]
+    fn connect_hints_point_at_the_vpn_side_that_can_fix_it() {
+        use std::io::{Error, ErrorKind};
+        let lan: IpAddr = "192.168.0.108".parse().unwrap();
+        let timeout = Error::from(ErrorKind::TimedOut);
+        assert!(connect_hint(&timeout, lan, true).contains("KillSwitch"));
+        let phone_side = connect_hint(&timeout, lan, false);
+        assert!(
+            phone_side.contains("Раздельное туннелирование") && !phone_side.contains("KillSwitch")
+        );
+        assert!(
+            connect_hint(&Error::from(ErrorKind::ConnectionRefused), lan, true)
+                .contains("не принимает")
+        );
+        // Nothing LAN-specific to say about an internet address.
+        assert_eq!(connect_hint(&timeout, "8.8.8.8".parse().unwrap(), true), "");
     }
 
     #[test]

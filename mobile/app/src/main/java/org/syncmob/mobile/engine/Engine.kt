@@ -113,6 +113,8 @@ class Engine(private val context: Context, val identity: Identity) {
         /** This phone's Wi-Fi/Ethernet addresses, for connecting from the PC by hand. */
         val localAddresses: List<String> = emptyList(),
         val vpnActive: Boolean = false,
+        /** The VPN refused to let us reach the LAN directly; only its settings can fix that. */
+        val vpnRefusesBypass: Boolean = false,
     )
 
     private val _state = MutableStateFlow(State(settings = Settings.load(context)))
@@ -367,14 +369,23 @@ class Engine(private val context: Context, val identity: Identity) {
                 runConnection(session, expectKey)
                 return@thread
             }
-            val hint = if (LocalNetwork.isVpnActive(context)) {
-                ". Включён VPN: добавьте SyncMob в исключения VPN или разрешите в нём доступ к локальной сети"
-            } else {
-                ""
-            }
-            note("Не удалось подключиться: ${failures.joinToString("; ")}$hint", LogLine.Level.ERROR)
+            note(
+                "Не удалось подключиться: ${failures.joinToString("; ")}. ${connectHint()}",
+                LogLine.Level.ERROR,
+            )
             refresh()
         }
+    }
+
+    /** What the user can actually do about a failed connection. */
+    private fun connectHint(): String = when {
+        LocalNetwork.isVpnActive(context) && LocalNetwork.bypassRefused -> VPN_REFUSES_BYPASS_HINT
+        LocalNetwork.isVpnActive(context) ->
+            "На телефоне включён VPN: добавьте SyncMob в его исключения или разрешите в нём " +
+                "доступ к локальной сети."
+        else ->
+            "Проверьте, что оба устройства в одной Wi-Fi сети. Если на ПК включён VPN с " +
+                "KillSwitch (например, AmneziaVPN), выключите KillSwitch: он блокирует локальную сеть."
     }
 
     fun dialPairingUri(uri: String) {
@@ -1021,6 +1032,7 @@ class Engine(private val context: Context, val identity: Identity) {
             log = synchronized(logLines) { logLines.toList() },
             localAddresses = LocalNetwork.localAddresses(context),
             vpnActive = LocalNetwork.isVpnActive(context),
+            vpnRefusesBypass = LocalNetwork.bypassRefused,
         )
     }
 
@@ -1051,6 +1063,11 @@ class Engine(private val context: Context, val identity: Identity) {
         const val PAIRING_TIMEOUT_MS = 180_000L
         const val OFFER_TIMEOUT_MS = 300_000L
         const val KEEPALIVE_MS = 30_000L
+        const val VPN_REFUSES_BYPASS_HINT =
+            "VPN на телефоне не пускает SyncMob в локальную сеть мимо туннеля. Добавьте SyncMob " +
+                "в исключения VPN — в AmneziaVPN: Настройки → Соединение → Раздельное " +
+                "туннелирование приложений → «Приложения из списка не должны работать через VPN»."
+
         /** Per-address connect timeout when a QR code lists several. */
         const val MULTI_DIAL_TIMEOUT_MS = 4_000
         private const val HANDSHAKES_PER_MINUTE = 10

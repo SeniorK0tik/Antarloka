@@ -26,6 +26,21 @@ import java.net.Socket
  */
 object LocalNetwork {
 
+    /**
+     * Set once a VPN has refused to let us pin a socket to Wi-Fi, cleared when
+     * pinning works again. AmneziaVPN on Android, for one, never allows it,
+     * and then the only fix is excluding SyncMob in the VPN's own settings.
+     */
+    @Volatile
+    var bypassRefused: Boolean = false
+        private set
+
+    private fun tryBind(block: () -> Unit): Boolean {
+        val ok = runCatching(block).isSuccess
+        bypassRefused = !ok
+        return ok
+    }
+
     private fun cm(context: Context): ConnectivityManager? =
         context.getSystemService(ConnectivityManager::class.java)
 
@@ -36,7 +51,7 @@ object LocalNetwork {
     fun isVpnActive(context: Context): Boolean = runCatching {
         val cm = cm(context) ?: return false
         networks(cm).any { (_, caps) -> caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) }
-    }.getOrDefault(false)
+    }.getOrDefault(false).also { if (!it) bypassRefused = false }
 
     /** The Wi-Fi or Ethernet network itself, not the VPN layered on top of it. */
     fun lanNetwork(context: Context): Network? = runCatching {
@@ -74,12 +89,12 @@ object LocalNetwork {
     /** Returns true if the socket was pinned to the local network. */
     fun bind(context: Context, socket: Socket, dest: InetAddress): Boolean {
         val n = networkFor(context, dest) ?: return false
-        return runCatching { n.bindSocket(socket) }.isSuccess
+        return tryBind { n.bindSocket(socket) }
     }
 
     /** Pin a discovery socket; beacons only ever go to the local segment. */
     fun bind(network: Network, socket: DatagramSocket): Boolean =
-        runCatching { network.bindSocket(socket) }.isSuccess
+        tryBind { network.bindSocket(socket) }
 
     private fun inSubnet(dest: InetAddress, link: LinkAddress): Boolean {
         val a = dest.address

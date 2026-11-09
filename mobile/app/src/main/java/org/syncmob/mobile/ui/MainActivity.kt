@@ -320,10 +320,13 @@ private fun DevicesScreen(
                 if (state.vpnActive) {
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        "Включён VPN. Если устройства не видят друг друга: введите адрес " +
-                            "телефона на ПК в «Подключиться по адресу», добавьте SyncMob в " +
-                            "исключения VPN (раздельное туннелирование) или разрешите в VPN " +
-                            "доступ к локальной сети.",
+                        if (state.vpnRefusesBypass) {
+                            Engine.VPN_REFUSES_BYPASS_HINT
+                        } else {
+                            "Включён VPN. Если устройства не видят друг друга, добавьте SyncMob " +
+                                "в исключения VPN (раздельное туннелирование приложений) или " +
+                                "разрешите в VPN доступ к локальной сети."
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = Amber,
                     )
